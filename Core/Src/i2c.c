@@ -1,8 +1,17 @@
 #include "stm32f4xx.h"
 #include "i2c.h"
 
-// 8 complete 6-byte (accel + gyro) binary readings
-static volatile uint8_t ring_buffer[96];
+// 8 complete 12-byte (accel + gyro) binary readings
+#define SINGLE_AXIS_READING_BYTES 2
+#define MEASURED_AXES             3
+#define MODALITIES                2
+#define SINGLE_IMU_READING_BYTES  (MODALITIES * MEASURED_AXES * SINGLE_AXIS_READING_BYTES)
+#define BUFFER_CAPACITY           8
+
+#define ACCEL_SCALE_RANGE         16384   //       +/-2g => 16,384 LSB/g 
+#define GYRO_SCALE_RANGE          131     // +/- 250 dps => 131 LSB/dps
+
+static volatile uint8_t ring_buffer[BUFFER_CAPACITY * SINGLE_IMU_READING_BYTES];
 static volatile uint8_t write_idx = 0;
 static volatile uint8_t imu_sample_count = 0;
 static volatile bool ekf_ready = 0;
@@ -58,15 +67,48 @@ void DMA1_Stream0_ISR(void) {
 
     //ring buffer management to wrap
     write_idx++;  
-    if(write_idx >= 8) write_idx = 0;
+    if(write_idx >= BUFFER_CAPACITY) write_idx = 0;
     sample_counter++;
   }
 
+  // set read frequency to 1/4 of the write frequency (100hz)
   if(sample_counter >= 4) {                     
     sample_counter = 0;
-    NVIC_SetPendingIRQ(EXTI0_IRQn);
-    ekf_ready = 1;                              
+    NVIC_SetPendingIRQ(EXTI0_IRQn);               // trigger attitude estimator read and process steps
+    ekf_ready = 1;                                
   }
+}
+
+void EXTI0_IRQHandler(void) {
+  EXTI->PR |= (1 << 0);                           // RM0390 10.3.6: clear external INT trigger request
+  if(ekf_ready) ekf_ready = 0;                    // prior reading is now considered stale
+
+  // get latest reading from ring buffer
+  uint8_t read_idx = 
+    (write_idx == 0) ? 7 : write_idx - 1;         // read_idx should lag write_idx by 1 
+
+  uint8_t* reading = &ring_buffer[read_idx * SINGLE_IMU_READING_BYTES]; 
+  
+  process_imu_data();
+}
+
+void process_imu_data(uint8_t* raw_data) {
+  int16_t ax_bin = (raw_data[0]  << 8 | raw_data[1]);
+  int16_t ax_bin = (raw_data[2]  << 8 | raw_data[3]);
+  int16_t ay_bin = (raw_data[4]  << 8 | raw_data[5]);
+
+  int16_t wz_bin = (raw_data[6]  << 8 | raw_data[7]);
+  int16_t wy_bin = (raw_data[8]  << 8 | raw_data[9]);
+  int16_t wz_bin = (raw_data[10] << 8 | raw_data[11]);
+
+  // TODO: replace with fixed point division?
+  int32_t ax_fix_g = ax_bin / ACCEL_SCALE_RANGE;
+  int32_t ay_fix_g = ay_bin / ACCEL_SCALE_RANGE;
+  int32_t az_fix_g = ax_bin / ACCEL_SCALE_RANGE;
+
+  int32_t wx_fix_g = wx_bin / GYRO_SCALE_RANGE;
+  int32_t wy_fix_g = wy_bin / GYRO_SCALE_RANGE;
+  int32_t wz_fix_g = wx_bin / GYRO_SCALE_RANGE;
 }
 
 void i2c_read_burst(uint8_t dev_bus_addr, uint8_t dev_reg_addr, uint16_t num_bytes) {
@@ -74,7 +116,7 @@ void i2c_read_burst(uint8_t dev_bus_addr, uint8_t dev_reg_addr, uint16_t num_byt
   while(DMA1_Stream0->CR & (0x01));               // wait until disabled
 
   DMA1_Stream0->M0AR = 
-    (uint32_t)&ring_buffer[write_idx * 12];
+    (uint32_t)&ring_buffer[write_idx * SINGLE_IMU_READING_BYTES];
 
   DMA1_Stream0->NDTR = 12;
   DMA1_Stream0->CR |= 0x01;                       // enable DMA
