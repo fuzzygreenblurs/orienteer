@@ -1,40 +1,20 @@
 #include "stm32f4xx.h"
 #include "i2c.h"
+#include "imu.h"
 
-// 8 complete 12-byte (accel + gyro) binary readings
-#define SINGLE_AXIS_READING_BYTES 2
-#define MEASURED_AXES             3
-#define MODALITIES                2
-#define SINGLE_IMU_READING_BYTES  (MODALITIES * MEASURED_AXES * SINGLE_AXIS_READING_BYTES)
-#define BUFFER_CAPACITY           8
-
-#define ACCEL_SCALE_RANGE         16384   //       +/-2g => 16,384 LSB/g 
-#define GYRO_SCALE_RANGE          131     // +/- 250 dps => 131 LSB/dps
-
-static volatile uint8_t ring_buffer[BUFFER_CAPACITY * SINGLE_IMU_READING_BYTES];
-static volatile uint8_t write_idx = 0;
-static volatile uint8_t imu_sample_count = 0;
-static volatile bool ekf_ready = 0;
-
-typedef struct {
-  int16_t ax, ay, az;
-  int16_t wx, wy, wz;
-} imu_reading_t;
-
-void configure_i2c() {
+void i2c_init() {
   // disable i2c peripheral
   I2C1->CR1 &= ~(1 << 0);
-    
-  enable_peripheral_clks();
-  setup_i2c_pins();
-  set_fast_mode();
-  configure_i2c_dma(); 
-
-  // enable I2C1 
+   
+  i2c_en_clks();
+  i2c_setup_pins();
+  i2c_set_fast_mode();
+  i2c_init_dma(); 
+// enable I2C1 
   I2C1->CR1 |= (1 << 0);
 }
 
-void configure_i2c_dma() {
+void i2c_init_dma() {
   RCC->AHB1ENR |= (1 << 21);                      // power up DMA1 peripheral through DMA1EN bit
  
  // RM0390: 9.5.5 (pg 226)
@@ -42,7 +22,7 @@ void configure_i2c_dma() {
   DMA1_Stream0->CR |= (1 << 25);                  // CHSEL = 001 (chan 1, I2C1_RX) -> RM0390: 9.3.4, table 28 
    
   DMA1_Stream0->PAR  = (uint32_t)&(I2C1->DR);     // TODO: stream0 source: peripheral addr (RM0390, 9.5.7)
-  DMA1_Stream0->M0AR = (uint32_t)&ring_buffer[0]; // double buffer: write pointer starts here (RM0390, 9.5.8)
+  DMA1_Stream0->M0AR = (uint32_t)imu_get_raw_buffer(); // buffer start position
   DMA1_Stream0->NDTR = 12;                        // 8 packets x 12 bytes/packet: 6 each for accel, gyro
     
   DMA1_Stream0->CR  &= ~(3 <<  6);                // DIR  = 00: peripheral-to-memory
@@ -51,72 +31,16 @@ void configure_i2c_dma() {
 
   DMA1_Stream0->FCR |=  (1 <<  2);                // DMDIS = 1; (disable direct mode)
   DMA1_Stream0->FCR |=   1;                       // DMDIS = 1; (disable direct mode)
-  DMA1_Stream0->CR  |=  (1 <<  4);                // TCIE =  1: transfer complete interrupt
+  DMA1_Stream0->CR  |=  (1 <<  4);                // TCIE =  1: transfer complete INT 
   DMA1_Stream0->CR  |=  (1 <<  0);                // enable DMA stream 
 }
 
-void DMA1_Stream0_ISR(void) {
-  static uint8_t sample_counter = 0;
-
-  if(DMA1->LISR &  (1<<5)) {                      // DMA "transfer complete" event raises TCIF0 int flag
-    DMA1->LIFCR |= (1<<5);                        // clear TCIFO int flag
-
-    //send NACK+STOP to end I2C transaction 
-    I2C1->CR1 &= ~(1 << 10);                      // NACK bit
-    I2C1->CR1 |=  (1 <<  9);                      // STOP bit
-
-    //ring buffer management to wrap
-    write_idx++;  
-    if(write_idx >= BUFFER_CAPACITY) write_idx = 0;
-    sample_counter++;
-  }
-
-  // set read frequency to 1/4 of the write frequency (100hz)
-  if(sample_counter >= 4) {                     
-    sample_counter = 0;
-    NVIC_SetPendingIRQ(EXTI0_IRQn);               // trigger attitude estimator read and process steps
-    ekf_ready = 1;                                
-  }
-}
-
-void EXTI0_IRQHandler(void) {
-  EXTI->PR |= (1 << 0);                           // RM0390 10.3.6: clear external INT trigger request
-  if(ekf_ready) ekf_ready = 0;                    // prior reading is now considered stale
-
-  // get latest reading from ring buffer
-  uint8_t read_idx = 
-    (write_idx == 0) ? 7 : write_idx - 1;         // read_idx should lag write_idx by 1 
-
-  uint8_t* reading = &ring_buffer[read_idx * SINGLE_IMU_READING_BYTES]; 
-  
-  process_imu_data();
-}
-
-void process_imu_data(uint8_t* raw_data) {
-  int16_t ax_bin = (raw_data[0]  << 8 | raw_data[1]);
-  int16_t ax_bin = (raw_data[2]  << 8 | raw_data[3]);
-  int16_t ay_bin = (raw_data[4]  << 8 | raw_data[5]);
-
-  int16_t wz_bin = (raw_data[6]  << 8 | raw_data[7]);
-  int16_t wy_bin = (raw_data[8]  << 8 | raw_data[9]);
-  int16_t wz_bin = (raw_data[10] << 8 | raw_data[11]);
-
-  // TODO: replace with fixed point division?
-  int32_t ax_fix_g = ax_bin / ACCEL_SCALE_RANGE;
-  int32_t ay_fix_g = ay_bin / ACCEL_SCALE_RANGE;
-  int32_t az_fix_g = ax_bin / ACCEL_SCALE_RANGE;
-
-  int32_t wx_fix_g = wx_bin / GYRO_SCALE_RANGE;
-  int32_t wy_fix_g = wy_bin / GYRO_SCALE_RANGE;
-  int32_t wz_fix_g = wx_bin / GYRO_SCALE_RANGE;
-}
 
 void i2c_read_burst(uint8_t dev_bus_addr, uint8_t dev_reg_addr, uint16_t num_bytes) {
   DMA1_Stream0->CR &= ~0x01;                      // disable DMA
   while(DMA1_Stream0->CR & (0x01));               // wait until disabled
 
-  DMA1_Stream0->M0AR = 
-    (uint32_t)&ring_buffer[write_idx * SINGLE_IMU_READING_BYTES];
+  DMA1_Stream0->M0AR = (uint32_t)imu_get_raw_write_position();
 
   DMA1_Stream0->NDTR = 12;
   DMA1_Stream0->CR |= 0x01;                       // enable DMA
@@ -142,7 +66,7 @@ void i2c_read_burst(uint8_t dev_bus_addr, uint8_t dev_reg_addr, uint16_t num_byt
 
   // REPEATED START for burst read  
   I2C1->CR1 |= (1 << 8);                          // repeated start to read full payload (num_bytes)
-  while(!(I2C1->SR1 & 0x01);                      // wait until the start condition propagates
+  while(!(I2C1->SR1 & 0x01));                     // wait until the start condition propagates
   
   I2C1->DR = (dev_bus_addr << 1) | 0x01;          // the LSB of the device addr specifies R/W (set for READ mode)
   while(!(I2C1->SR1 & (1 << 1)));                 // wait until HW sets "dev found" ADDR flag upon matching target addr (RM0390 24.6.7) 
@@ -150,7 +74,7 @@ void i2c_read_burst(uint8_t dev_bus_addr, uint8_t dev_reg_addr, uint16_t num_byt
   (void)I2C1->SR2;                                // clearing the ADDR bit triggers IMU to begin transmitting reading
 }
 
-void en_peripheral_clks() {
+void i2c_en_clks() {
   // enable gpiob and i2c1 peripheral clocks (resp)
     // gpiob clk: powers GPIOA port peripheral (pin control, AF routing)
     // i2c1 clk : powers I2C1 peripheral logic
@@ -158,7 +82,7 @@ void en_peripheral_clks() {
   RCC->APB1ENR |= (1 << 21);
 }
 
-void setup_i2c_pins() {
+void i2c_setup_pins() {
   // set pins PB6/7 to AF mode
   GPIOB->MODER &= ~((3 << 12) | (3 << 14));
   GPIOB->MODER |= (2 << 12) | (2 << 14);
@@ -169,12 +93,13 @@ void setup_i2c_pins() {
 
   // configure pins to be open-drain
   GPIOB->OTYPER |= (1 << 6) | (1 << 7);
-}
+
   // enable pullups
   GPIOB->PUPDR &= ~((3 << 12) | (3 << 14));
   GPIOB->PUPDR |= (1 << 12) | (1 << 14);
+}
 
-void set_fast_mode() {
+void i2c_set_fast_mode() {
   /*
    TIMINGR:
     controls the I2C timing characteristics
@@ -201,7 +126,9 @@ void set_fast_mode() {
       setup/hold times: Meet I2C fast-mode specs 
   */
 
-  I2C1->TIMINGR = 0x00503D5A;
+  // STM32F446 uses different I2C configuration
+  I2C1->CCR = 210;  // Fast mode 400kHz with 42MHz APB1
+  I2C1->TRISE = 14; // Rise time for fast mode
 }
 
 /*
@@ -216,12 +143,5 @@ void set_fast_mode() {
  *    - assuming that the cpu can run this within 2.5ms, the cpu is then performing 1 estimate every 10ms, or running at100hz.
 
  * */
-
-
-
-
-
-
-
 
 

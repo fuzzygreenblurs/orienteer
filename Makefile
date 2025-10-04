@@ -40,7 +40,11 @@ Core/Src/main.c \
 Core/Src/system_stm32f4xx.c \
 Core/Src/sysmem.c \
 Core/Src/clk_config.c \
-Core/Src/syscalls.c  
+Core/Src/syscalls.c \
+Core/Src/uart.c \
+Core/Src/i2c.c \
+Core/Src/imu.c \
+Core/Src/dummy_led_helpers.c  
 
 # ASM sources
 ASM_SOURCES =  \

@@ -1,6 +1,11 @@
+#include <stdbool.h>
+#include "stm32f4xx.h"
 #include "uart.h"
+#include "imu.h"
 
-void configure_uart() {
+volatile uint8_t uart_tx_busy = 0;
+
+void uart_init() {
   RCC->AHB1ENR |= 1;        // powers GPIOA port peripheral (pin control, alt function routing)
   RCC->APB1ENR |= 0x20000;  // powers USART2 peripheral logic
 
@@ -18,6 +23,34 @@ void configure_uart() {
   USART2->CR1 |= 0x2000;    // enable USART2 
 }
 
+void uart_init_dma(void) {
+  DMA1_Stream6->CR &= ~(1 << 0);                  // disable DMA stream first to allow config changes
+  while(DMA1_Stream6->CR & (1 << 0));             // RM0390 9.5.5: wait for stream to be disabled
+
+  DMA1_Stream6->CR |= (4 << 25);                  // setup USART2_TX (chan 4): RM0390 Table 28 and 9.5.5
+  DMA1_Stream6->CR |= (1 << 6);                   // mem-to-peripheral transfer direction
+  DMA1_Stream6->CR |= (1 << 10);                  // MINC = 1: mem increment
+  DMA1_Stream6->CR |= (1 << 4);                   // TCIE = 1: enable transfer complete INT
+ 
+  DMA1_Stream6->PAR = (uint32_t)&USART2->DR;      // set peripheral addr (dest) to the usart data buffer 
+          
+  NVIC_EnableIRQ(DMA1_Stream6_IRQn);              // raise interrupt upon completing mem-to-peripheral transfer
+  USART2->CR3 |= (1 << 7);                        // enable USART2 DMA TX
+}
+
+void uart_transmit_attitude(void) {
+  if(!uart_tx_busy) {
+    uart_tx_busy = 1;
+
+    DMA1_Stream6->CR &= ~(1 << 0);                    // disable DMA stream first to allow config changes
+    while(DMA1_Stream6->CR & (1 << 0));               // RM0390 9.5.5: wait for stream to be disabled
+
+    DMA1_Stream6->M0AR = (uint32_t)imu_get_current_attitude();  // source from current attitude
+    DMA1_Stream6->NDTR = sizeof(attitude_t);          // DMA increments over entire reading
+    DMA1_Stream6->CR |= (1 << 0);                      // enable DMA1:S6
+  }
+}
+
 void uart_send_char(int c) {
   while(!(USART2->SR & 0x0080));     // wait until TX buffer is empty
   USART2->DR = (c & 0xFF);
@@ -27,4 +60,21 @@ void uart_send_string(const char* str) {
   while(*str) {
     uart_send_char(*str++);
   }
+}
+
+void uart_enqueue_estimate(void) {
+  // TODO: Implement using imu API
+}
+
+bool is_buffer_empty(void) {
+  // TODO: Implement using imu API
+  return true;
+}
+
+void DMA1_Stream6_IRQHandler(void) {
+  if(DMA1->HISR &  (1 << 21)) {                       // RM0390 9.5.2: transfer complete
+    DMA1->HIFCR |= (1 << 21);                         // RM0390 9.5.2: clear transfer copmlete status bit
+    uart_tx_busy = 0;
+  }
+  // TODO: Implement using imu API
 }
