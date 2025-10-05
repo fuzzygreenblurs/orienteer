@@ -2,6 +2,86 @@
 #include "i2c.h"
 #include "imu.h"
 
+bool i2c_ping(uint8_t addr) {
+  I2C1->CR1 |= (1 << 8);                          // set START bit
+
+  uint32_t timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 0)) && timeout > 0) { // wait for START condition to be set
+    timeout--;
+  }
+  if(timeout == 0) return 0;                       // START failed
+
+  I2C1->DR = addr << 1;                            // send 7 bit addr
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 1)) && timeout > 0) {  // wait for addr to be sent and ACK response
+    timeout--;
+  }
+
+  bool dev_found = ( timeout > 0 ) ? 1 : 0;
+  if(dev_found) (void)I2C1->SR2;                    // clear ADDR flag if device responds
+
+  I2C1->CR1 |= (1 << 9);                            // always cleanup with STOP bit
+  return dev_found;
+
+}
+
+uint8_t i2c_read_reg(uint8_t dev_addr, uint8_t reg_addr) {
+  I2C1->CR1 |= (1 << 8);                  
+
+  uint32_t timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 0)) && timeout > 0) { // wait for START condition to be set
+    timeout--;
+  }
+  if(timeout == 0) return 0;                       // START failed
+
+  I2C1->DR = (dev_addr << 1);                            // send 7 bit addr
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 1)) && timeout > 0) {  // wait for addr to be sent and ACK response
+    timeout--;
+  }
+  if(timeout == 0) return 0;
+  (void)I2C1->SR2;                                // clear ADDR flag
+  
+  I2C1->DR = reg_addr;                           
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 7)) && timeout > 0) {  // wait for TxE
+    timeout--;
+  }
+  if(timeout == 0) return 0;
+
+  // REPEATED START for read phase
+  I2C1->CR1 |= (1 << 8);  // Set START bit again
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 0)) && timeout > 0) {
+    timeout--;
+  }
+  if(timeout == 0) return 0;
+
+  // Send device address in READ mode
+  I2C1->DR = (dev_addr << 1) | 0x01;  // 0x01 sets read bit
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 1)) && timeout > 0) {
+    timeout--;
+  }
+  if(timeout == 0) return 0;
+  (void)I2C1->SR2;  // Clear ADDR flag
+
+  // Disable ACK for single byte read and wait for data
+  I2C1->CR1 &= ~(1 << 10);  // Clear ACK bit (send NACK)
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 6)) && timeout > 0) { // RxNE = bit 6
+    timeout--;
+  }
+  if(timeout == 0) return 0;
+
+  // Read data and send STOP
+  uint8_t data = I2C1->DR;
+  I2C1->CR1 |= (1 << 9);  // STOP condition
+  return data;
+}
+
+
+
 void i2c_init() {
   // disable i2c peripheral
   I2C1->CR1 &= ~(1 << 0);
@@ -125,10 +205,10 @@ void i2c_set_fast_mode() {
       split: ~61 cycles high + 90 cycles low = 151 total (includes overhead)
       setup/hold times: Meet I2C fast-mode specs 
   */
-
-  // STM32F446 uses different I2C configuration
-  I2C1->CCR = 210;  // Fast mode 400kHz with 42MHz APB1
-  I2C1->TRISE = 14; // Rise time for fast mode
+  I2C1->CCR = 210;
+  I2C1->TRISE = 14;
+  
+  // I2C1->TIMINGR = 0x00503D5A;
 }
 
 /*
