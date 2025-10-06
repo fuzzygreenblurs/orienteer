@@ -150,6 +150,10 @@ int main(void)
   uart_send_string("EXTI0 configured and enabled\r\n");
   uart_send_string("System ready - interrupts should be firing\r\n\r\n");
 
+  // Select estimator type
+  imu_set_estimator(ESTIMATOR_COMPLEMENTARY);
+  uart_send_string("Using COMPLEMENTARY filter\r\n\r\n");
+
   uint32_t last_ekf = 0;
 
   while(1){

@@ -143,8 +143,44 @@ static void estimator_simple_trig(uint8_t* raw_data) {
 }
 
 static void estimator_complementary(uint8_t* raw_data) {
-  // TODO: Implement complementary filter
-  (void)raw_data;
+  // Extract raw sensor values (big-endian 16-bit)
+  int16_t ax_bin = (raw_data[0] << 8) | raw_data[1];
+  int16_t ay_bin = (raw_data[2] << 8) | raw_data[3];
+  int16_t az_bin = (raw_data[4] << 8) | raw_data[5];
+
+  int16_t wx_bin = (raw_data[6] << 8) | raw_data[7];
+  int16_t wy_bin = (raw_data[8] << 8) | raw_data[9];
+  int16_t wz_bin = (raw_data[10] << 8) | raw_data[11];
+
+  // Convert to metric units
+  float ax_g = (float)ax_bin / 16384.0f;
+  float ay_g = (float)ay_bin / 16384.0f;
+  float az_g = (float)az_bin / 16384.0f;
+
+  float wx_dps = (float)wx_bin / 131.0f;
+  float wy_dps = (float)wy_bin / 131.0f;
+  float wz_dps = (float)wz_bin / 131.0f;
+
+  // Time step (125Hz = 0.008s)
+  const float dt = 0.008f;
+
+  // Alpha: how much to trust gyro vs accel (0.98 = 98% gyro, 2% accel)
+  const float alpha = 0.98f;
+
+  // Gyro integration (predict step)
+  float roll_gyro = current_attitude.roll + wx_dps * dt;
+  float pitch_gyro = current_attitude.pitch + wy_dps * dt;
+  float yaw_gyro = current_attitude.yaw + wz_dps * dt;
+
+  // Accelerometer angle calculation (measure step)
+  float roll_accel = atan2f(ay_g, az_g) * 180.0f / M_PI;
+  float pitch_accel = atan2f(-ax_g, sqrtf(ay_g*ay_g + az_g*az_g)) * 180.0f / M_PI;
+
+  // Complementary filter fusion
+  current_attitude.roll = alpha * roll_gyro + (1.0f - alpha) * roll_accel;
+  current_attitude.pitch = alpha * pitch_gyro + (1.0f - alpha) * pitch_accel;
+  current_attitude.yaw = yaw_gyro;  // No accel correction for yaw (needs mag)
+
   current_attitude.timestamp++;
 }
 
