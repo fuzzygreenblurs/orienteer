@@ -103,8 +103,12 @@ int main(void)
   // Configure MPU6050 for interrupt-driven mode
   uart_send_string("\r\nConfiguring MPU6050 interrupts...\r\n");
 
+  // Give MPU6050 time to power up (100ms)
+  for(volatile uint32_t i = 0; i < 2000000; i++);
+
   // 1. Wake up MPU6050 (clear sleep bit)
   i2c_write_reg(0x68, 0x6B, 0x00);
+  for(volatile uint32_t i = 0; i < 200000; i++); // 10ms delay
   uart_send_string("MPU6050 awake\r\n");
 
   // 2. Set sample rate to 500Hz (1kHz / (1 + 1))

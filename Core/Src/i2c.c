@@ -112,15 +112,40 @@ void i2c_write_reg(uint8_t dev_addr, uint8_t reg_addr, uint8_t value) {
 }
 
 void i2c_init() {
-  // disable i2c peripheral
+  // Disable i2c peripheral first
   I2C1->CR1 &= ~(1 << 0);
-   
+
+  // Enable clocks before bus recovery
   i2c_en_clks();
+
+  // I2C bus recovery: manually clock out any stuck transaction
+  // Temporarily configure pins as GPIO to bit-bang SCL
+  GPIOB->MODER &= ~((3 << 12) | (3 << 14));  // Clear mode bits
+  GPIOB->MODER |= (1 << 12) | (1 << 14);      // PB6/PB7 as GPIO output
+
+  // Generate 9 clock pulses on SCL to release SDA
+  for(int i = 0; i < 9; i++) {
+    GPIOB->ODR &= ~(1 << 6);  // SCL low
+    for(volatile int j = 0; j < 100; j++);
+    GPIOB->ODR |= (1 << 6);   // SCL high
+    for(volatile int j = 0; j < 100; j++);
+  }
+
+  // Software reset I2C peripheral
+  I2C1->CR1 |= (1 << 15);  // SWRST
+  for(volatile uint32_t i = 0; i < 1000; i++);
+  I2C1->CR1 &= ~(1 << 15); // Clear SWRST
+
+  // Reconfigure pins as I2C alternate function
   i2c_setup_pins();
   i2c_set_fast_mode();
-  i2c_init_dma(); 
-// enable I2C1 
+  i2c_init_dma();
+
+  // Enable I2C1
   I2C1->CR1 |= (1 << 0);
+
+  // Give I2C time to stabilize
+  for(volatile uint32_t i = 0; i < 10000; i++);
 }
 
 void i2c_init_dma() {
@@ -157,9 +182,13 @@ void i2c_init_dma() {
 
 
 void i2c_read_burst(uint8_t dev_bus_addr, uint8_t dev_reg_addr, uint8_t* buffer, uint16_t num_bytes) {
+  uint32_t timeout;
+
   // Disable and reconfigure DMA for this transfer
   DMA1_Stream0->CR &= ~(1 << 0);                          // Disable DMA
-  while(DMA1_Stream0->CR & (1 << 0));                     // KEEP: Must wait for DMA to disable
+  timeout = 10000;
+  while((DMA1_Stream0->CR & (1 << 0)) && timeout > 0) timeout--;
+  if(timeout == 0) return; // DMA disable failed
 
   // Clear all DMA flags
   DMA1->LIFCR |= (0x3F << 0);                             // Clear all Stream0 flags
@@ -183,24 +212,34 @@ void i2c_read_burst(uint8_t dev_bus_addr, uint8_t dev_reg_addr, uint8_t* buffer,
 
   // Start I2C communication - write phase
   I2C1->CR1 |= (1 << 8);                                 // Generate START
-  while(!(I2C1->SR1 & (1 << 0)));                        // Wait for START
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 0)) && timeout > 0) timeout--;
+  if(timeout == 0) return; // START failed
 
   // Send device address in write mode
   I2C1->DR = dev_bus_addr << 1;
-  while(!(I2C1->SR1 & (1 << 1)));                        // Wait for ADDR
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 1)) && timeout > 0) timeout--;
+  if(timeout == 0) return; // ADDR failed
   (void)I2C1->SR2;                                        // Clear ADDR flag
 
   // Send register address
   I2C1->DR = dev_reg_addr;
-  while(!(I2C1->SR1 & (1 << 7)));                        // Wait for TxE before repeated START
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 7)) && timeout > 0) timeout--;
+  if(timeout == 0) return; // TxE failed
 
   // Generate repeated START for read
   I2C1->CR1 |= (1 << 8);
-  while(!(I2C1->SR1 & (1 << 0)));                        // Wait for START
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 0)) && timeout > 0) timeout--;
+  if(timeout == 0) return; // Repeated START failed
 
   // Send device address in read mode
   I2C1->DR = (dev_bus_addr << 1) | 0x01;
-  while(!(I2C1->SR1 & (1 << 1)));                        // Wait for ADDR
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 1)) && timeout > 0) timeout--;
+  if(timeout == 0) return; // ADDR failed
 
   // Enable DMA and clear ADDR to start reception
   DMA1_Stream0->CR |= (1 << 0);                           // Enable DMA
