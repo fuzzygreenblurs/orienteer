@@ -18,6 +18,11 @@ static volatile uint8_t imu_estimate_read_idx = 0;
 
 static volatile bool ekf_ready = 0;
 static attitude_t current_attitude = {0};
+static estimator_type_t current_estimator = ESTIMATOR_SIMPLE_TRIG;
+
+void imu_set_estimator(estimator_type_t type) {
+  current_estimator = type;
+}
 
 void imu_init(void) {
   // generates the requisite 400Hz sampling ticker
@@ -106,38 +111,78 @@ attitude_t* imu_get_current_attitude(void) {
     return &current_attitude;
 }
 
-void TIM2_IRQHandler(void) {
-  // triggers reads from IMU based on set TIM2 frequency
+// Estimator implementations
 
-  if(TIM2->SR & (1 << 0)) {                       // check and clear update INT flag(if set) 
-    TIM2->SR &= ~(1 << 0);
-  }
+static void estimator_simple_trig(uint8_t* raw_data) {
+  // Extract raw sensor values (big-endian 16-bit)
+  int16_t ax_bin = (raw_data[0] << 8) | raw_data[1];
+  int16_t ay_bin = (raw_data[2] << 8) | raw_data[3];
+  int16_t az_bin = (raw_data[4] << 8) | raw_data[5];
 
-  i2c_read_burst(0x68, 0x3B, 12);                 // request IMU for a reading
+  int16_t wx_bin = (raw_data[6] << 8) | raw_data[7];
+  int16_t wy_bin = (raw_data[8] << 8) | raw_data[9];
+  int16_t wz_bin = (raw_data[10] << 8) | raw_data[11];
+
+  // Convert to metric units (g's and deg/s)
+  // MPU6050 default: ±2g range = 16384 LSB/g, ±250°/s = 131 LSB/°/s
+  float ax_g = (float)ax_bin / 16384.0f;
+  float ay_g = (float)ay_bin / 16384.0f;
+  float az_g = (float)az_bin / 16384.0f;
+
+  float wx_dps = (float)wx_bin / 131.0f;
+  float wy_dps = (float)wy_bin / 131.0f;
+  float wz_dps = (float)wz_bin / 131.0f;
+
+  (void)wx_dps; (void)wy_dps; // Not used in simple trig
+
+  // Simple trigonometric attitude calculation
+  current_attitude.roll = atan2f(ay_g, az_g) * 180.0f / M_PI;
+  current_attitude.pitch = atan2f(-ax_g, sqrtf(ay_g*ay_g + az_g*az_g)) * 180.0f / M_PI;
+  current_attitude.yaw += wz_dps * 0.008f; // Integrate yaw (125Hz = 0.008s)
+  current_attitude.timestamp++;
 }
 
-void DMA1_Stream0_IRQHandler(void) {
-  static uint8_t sample_counter = 0;
+static void estimator_complementary(uint8_t* raw_data) {
+  // TODO: Implement complementary filter
+  (void)raw_data;
+  current_attitude.timestamp++;
+}
 
-  if(DMA1->LISR &  (1<<5)) {                      // DMA "transfer complete" event raises TCIF0 int flag
-    DMA1->LIFCR |= (1<<5);                        // clear TCIFO int flag
+static void estimator_ekf(uint8_t* raw_data) {
+  // TODO: Implement EKF
+  (void)raw_data;
+  current_attitude.timestamp++;
+}
 
-    //send NACK+STOP to end I2C transaction 
-    I2C1->CR1 &= ~(1 << 10);                      // NACK bit
-    I2C1->CR1 |=  (1 <<  9);                      // STOP bit
+static void estimator_ukf(uint8_t* raw_data) {
+  // TODO: Implement UKF
+  (void)raw_data;
+  current_attitude.timestamp++;
+}
 
-    //wrap pointers around FIFO
-    imu_raw_write_idx++;  
-    if(imu_raw_write_idx >= BUFFER_CAPACITY) imu_raw_write_idx = 0;
-    sample_counter++;
-  }
+void imu_run_estimator(uint8_t* raw_data) {
+  switch(current_estimator) {
+    case ESTIMATOR_SIMPLE_TRIG:
+      estimator_simple_trig(raw_data);
+      break;
 
-  // set read frequency to 1/4 of the write frequency (100hz)
-  if(sample_counter >= 4) {                     
-    sample_counter = 0;
-    NVIC_SetPendingIRQ(EXTI0_IRQn);               // trigger attitude estimator read and process steps
-    ekf_ready = 1;                                
+    case ESTIMATOR_COMPLEMENTARY:
+      estimator_complementary(raw_data);
+      break;
+
+    case ESTIMATOR_EKF:
+      estimator_ekf(raw_data);
+      break;
+
+    case ESTIMATOR_UKF:
+      estimator_ukf(raw_data);
+      break;
+
+    default:
+      estimator_simple_trig(raw_data);
+      break;
   }
 }
 
-// EXTI0_IRQHandler moved to main.c for interrupt-driven approach
+// Old timer-based handlers - not used in interrupt-driven approach
+// TIM2_IRQHandler, DMA1_Stream0_IRQHandler, and EXTI0_IRQHandler moved to main.c

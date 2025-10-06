@@ -6,11 +6,62 @@
 #include "dummy_led_helpers.h"
 
 volatile uint32_t exti_count = 0;
+volatile uint32_t dma_count = 0;
+volatile uint32_t exti_dropped = 0;
+volatile uint32_t ekf_count = 0;
+
+// Simple buffer to hold one IMU reading (12 bytes: 6 accel + 6 gyro)
+uint8_t imu_buffer[12];
 
 void EXTI0_IRQHandler(void) {
   EXTI->PR |= (1 << 0);  // Clear pending flag
   exti_count++;
-  GPIOA->ODR ^= (1 << 5); // Toggle LED
+
+  // Check if DMA is still busy from previous read
+  if(DMA1_Stream0->CR & (1 << 0)) {  // DMA enabled = busy
+    exti_dropped++;
+    return;
+  }
+
+  // Trigger I2C+DMA burst read of 12 bytes from register 0x3B
+  i2c_read_burst(0x68, 0x3B, imu_buffer, 12);
+}
+
+void DMA1_Stream0_IRQHandler(void) {
+  static uint8_t sample_counter = 0;
+
+  if(DMA1->LISR & (1 << 5)) {  // Transfer complete
+    DMA1->LIFCR |= (0x3F << 0);  // Clear all Stream0 flags
+
+    dma_count++;
+
+    // Disable DMA stream
+    DMA1_Stream0->CR &= ~(1 << 0);
+
+    // Send I2C STOP condition
+    I2C1->CR1 |= (1 << 9);
+
+    // Wait briefly for STOP to complete
+    uint32_t timeout = 1000;
+    while((I2C1->SR2 & (1 << 1)) && timeout > 0) timeout--;
+
+    // Disable I2C DMA
+    I2C1->CR2 &= ~(1 << 11);
+    I2C1->CR2 &= ~(1 << 12);
+
+    // Run estimator every 2nd sample (250Hz -> 125Hz EKF rate)
+    sample_counter++;
+    if(sample_counter >= 2) {
+      sample_counter = 0;
+      ekf_count++;
+
+      // Run the estimator on the raw data
+      imu_run_estimator(imu_buffer);
+    }
+
+    // Toggle LED to show DMA activity
+    GPIOA->ODR ^= (1 << 5);
+  }
 }
 
 int main(void)
@@ -95,17 +146,26 @@ int main(void)
   uart_send_string("EXTI0 configured and enabled\r\n");
   uart_send_string("System ready - interrupts should be firing\r\n\r\n");
 
-  uint32_t last_count = 0;
+  uint32_t last_ekf = 0;
 
   while(1){
-    // Print interrupt count every ~1 second
-    for(volatile uint32_t i = 0; i < 2000000; i++);
+    // Print attitude at ~10Hz (100ms intervals)
+    for(volatile uint32_t i = 0; i < 200000; i++);
 
-    if(exti_count != last_count) {
-      uart_send_string("EXTI count: ");
-      uart_send_int(exti_count);
+    if(ekf_count != last_ekf) {
+      attitude_t* att = imu_get_current_attitude();
+
+      uart_send_string("EKF:");
+      uart_send_int(ekf_count);
+      uart_send_string(" R:");
+      uart_send_int((int32_t)att->roll);
+      uart_send_string(" P:");
+      uart_send_int((int32_t)att->pitch);
+      uart_send_string(" Y:");
+      uart_send_int((int32_t)att->yaw);
       uart_send_string("\r\n");
-      last_count = exti_count;
+
+      last_ekf = ekf_count;
     }
   }
 }

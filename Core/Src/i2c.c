@@ -124,63 +124,87 @@ void i2c_init() {
 }
 
 void i2c_init_dma() {
-  RCC->AHB1ENR |= (1 << 21);                      // power up DMA1 peripheral through DMA1EN bit
- 
- // RM0390: 9.5.5 (pg 226)
-  DMA1_Stream0->CR &= ~(1 << 0);                  // disable DMA stream first to allow config changes
-  DMA1_Stream0->CR |= (1 << 25);                  // CHSEL = 001 (chan 1, I2C1_RX) -> RM0390: 9.3.4, table 28 
-   
-  DMA1_Stream0->PAR  = (uint32_t)&(I2C1->DR);     // TODO: stream0 source: peripheral addr (RM0390, 9.5.7)
-  DMA1_Stream0->M0AR = (uint32_t)imu_get_raw_buffer(); // buffer start position
-  DMA1_Stream0->NDTR = 12;                        // 8 packets x 12 bytes/packet: 6 each for accel, gyro
-    
-  DMA1_Stream0->CR  &= ~(3 <<  6);                // DIR  = 00: peripheral-to-memory
-  DMA1_Stream0->CR  &= ~(1 <<  8);                // CIRC =  0: single transfer mode
-  DMA1_Stream0->CR  |=  (1 << 10);                // MINC =  1: memory increment
+  RCC->AHB1ENR |= (1 << 21);                      // Enable DMA1 clock
 
-  DMA1_Stream0->FCR |=  (1 <<  2);                // DMDIS = 1; (disable direct mode)
-  DMA1_Stream0->FCR |=   1;                       // DMDIS = 1; (disable direct mode)
-  DMA1_Stream0->CR  |=  (1 <<  4);                // TCIE =  1: transfer complete INT 
-  DMA1_Stream0->CR  |=  (1 <<  0);                // enable DMA stream 
+  // Disable stream first
+  DMA1_Stream0->CR &= ~(1 << 0);
+  while(DMA1_Stream0->CR & (1 << 0));              // Wait until disabled
+
+  // Clear all interrupt flags
+  DMA1->LIFCR |= (0x3F << 0);                     // Clear all Stream0 flags
+
+  // Configure DMA1 Stream0 Channel 1 for I2C1_RX
+  DMA1_Stream0->CR = 0;                           // Reset control register
+  DMA1_Stream0->CR |= (1 << 25);                  // Channel 1 (I2C1_RX)
+  DMA1_Stream0->CR |= (0 << 6);                   // Peripheral-to-memory
+  DMA1_Stream0->CR |= (1 << 10);                  // Memory increment
+  DMA1_Stream0->CR |= (0 << 11);                  // Peripheral no increment
+  DMA1_Stream0->CR |= (0 << 13);                  // Memory data size: byte
+  DMA1_Stream0->CR |= (0 << 11);                  // Peripheral data size: byte
+  DMA1_Stream0->CR |= (1 << 4);                   // Transfer complete interrupt
+  DMA1_Stream0->CR |= (2 << 16);                  // High priority
+
+  // Set peripheral address (I2C1 data register)
+  DMA1_Stream0->PAR = (uint32_t)&I2C1->DR;
+
+  // Use direct mode for I2C (FIFO disabled)
+  DMA1_Stream0->FCR = 0;  // Direct mode enabled (default)
+
+  // Enable DMA interrupt in NVIC
+  NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  NVIC_SetPriority(DMA1_Stream0_IRQn, 1);
 }
 
 
-void i2c_read_burst(uint8_t dev_bus_addr, uint8_t dev_reg_addr, uint16_t num_bytes) {
-  DMA1_Stream0->CR &= ~0x01;                      // disable DMA
-  while(DMA1_Stream0->CR & (0x01));               // wait until disabled
+void i2c_read_burst(uint8_t dev_bus_addr, uint8_t dev_reg_addr, uint8_t* buffer, uint16_t num_bytes) {
+  // Disable and reconfigure DMA for this transfer
+  DMA1_Stream0->CR &= ~(1 << 0);                          // Disable DMA
+  while(DMA1_Stream0->CR & (1 << 0));                     // KEEP: Must wait for DMA to disable
 
-  DMA1_Stream0->M0AR = (uint32_t)imu_get_raw_write_position();
+  // Clear all DMA flags
+  DMA1->LIFCR |= (0x3F << 0);                             // Clear all Stream0 flags
 
-  DMA1_Stream0->NDTR = 12;
-  DMA1_Stream0->CR |= 0x01;                       // enable DMA
-  I2C1->CR2 |= (1 << 11);                         // enable DMA for I2C1 (set DMAEN)
+  // Reconfigure DMA addresses and count
+  DMA1_Stream0->M0AR = (uint32_t)buffer;
+  DMA1_Stream0->NDTR = num_bytes;
 
-  while(I2C1->SR2 & (1 << 1));                   // wait until bus is idle
-  
-  // START
-  I2C1->CR1 |= (1 << 8);                          // SW trigger to set HW START bit 
-  while(!(I2C1->SR1 & 0x01));                     // wait until the start condition propagates
+  // Reset and configure I2C for DMA reception
+  I2C1->CR2 &= ~(1 << 11);                               // Disable DMA first
+  I2C1->CR2 &= ~(1 << 12);                               // Clear LAST bit
+  I2C1->CR1 |= (1 << 10);                                // Enable ACK
 
-  // send dev and reg addrs
-  I2C1->DR = dev_bus_addr;                        // ping the device on the bus  
-  while(!(I2C1->SR1 & (1 << 1)));                 // wait until HW sets "dev found" ADDR flag upon matching target addr (RM0390 24.6.7)
+  if(num_bytes == 1) {
+    I2C1->CR1 &= ~(1 << 10);                             // Disable ACK for single byte
+  } else {
+    I2C1->CR2 |= (1 << 12);                              // Set LAST bit for multi-byte
+  }
 
-  (void)I2C1->SR2;                                // dummy read from SR2 immediately after SR1 clears ADDR bit (RM0390 24.6.7)
-                                                  //   - the ADDR bit confirms that the target device is found
-                                                  //   - clearing the bit allows the protocol to continue to the "data phase"
+  I2C1->CR2 |= (1 << 11);                                // Enable DMA requests
 
+  // Start I2C communication - write phase
+  I2C1->CR1 |= (1 << 8);                                 // Generate START
+  while(!(I2C1->SR1 & (1 << 0)));                        // Wait for START
+
+  // Send device address in write mode
+  I2C1->DR = dev_bus_addr << 1;
+  while(!(I2C1->SR1 & (1 << 1)));                        // Wait for ADDR
+  (void)I2C1->SR2;                                        // Clear ADDR flag
+
+  // Send register address
   I2C1->DR = dev_reg_addr;
-  while(I2C1->SR1 & (1 << 7));                    // wait for the TxE (transmitter register empty) flag
-                                                  //   - byte written to I2C1->DR has been moved to shift register
+  while(!(I2C1->SR1 & (1 << 7)));                        // Wait for TxE before repeated START
 
-  // REPEATED START for burst read  
-  I2C1->CR1 |= (1 << 8);                          // repeated start to read full payload (num_bytes)
-  while(!(I2C1->SR1 & 0x01));                     // wait until the start condition propagates
-  
-  I2C1->DR = (dev_bus_addr << 1) | 0x01;          // the LSB of the device addr specifies R/W (set for READ mode)
-  while(!(I2C1->SR1 & (1 << 1)));                 // wait until HW sets "dev found" ADDR flag upon matching target addr (RM0390 24.6.7) 
+  // Generate repeated START for read
+  I2C1->CR1 |= (1 << 8);
+  while(!(I2C1->SR1 & (1 << 0)));                        // Wait for START
 
-  (void)I2C1->SR2;                                // clearing the ADDR bit triggers IMU to begin transmitting reading
+  // Send device address in read mode
+  I2C1->DR = (dev_bus_addr << 1) | 0x01;
+  while(!(I2C1->SR1 & (1 << 1)));                        // Wait for ADDR
+
+  // Enable DMA and clear ADDR to start reception
+  DMA1_Stream0->CR |= (1 << 0);                           // Enable DMA
+  (void)I2C1->SR2;                                        // Clear ADDR - starts DMA transfer
 }
 
 void i2c_en_clks() {
@@ -234,7 +258,7 @@ void i2c_set_fast_mode() {
       split: ~61 cycles high + 90 cycles low = 151 total (includes overhead)
       setup/hold times: Meet I2C fast-mode specs 
   */
-  I2C1->CCR = 210;
+  I2C1->CCR = (1 << 15) | 35;   // Fast mode (bit 15) + 400kHz (42MHz / (3 × 35) ≈ 400kHz)
   I2C1->TRISE = 14;
   
   // I2C1->TIMINGR = 0x00503D5A;

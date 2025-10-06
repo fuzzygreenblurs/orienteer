@@ -22,6 +22,14 @@ typedef struct {
   uint32_t timestamp;
 } attitude_t;
 
+// Estimator types
+typedef enum {
+  ESTIMATOR_SIMPLE_TRIG = 0,  // Simple atan2-based (placeholder)
+  ESTIMATOR_COMPLEMENTARY,     // Complementary filter
+  ESTIMATOR_EKF,               // Extended Kalman Filter
+  ESTIMATOR_UKF                // Unscented Kalman Filter
+} estimator_type_t;
+
 // Buffer access API - no direct buffer access
 uint8_t* imu_get_raw_buffer(void);
 uint8_t* imu_get_raw_write_position(void);
@@ -33,5 +41,9 @@ void imu_set_estimate_write_index(uint8_t idx);
 void imu_init(void);
 void imu_process_latest(void);
 attitude_t* imu_get_current_attitude(void);
+
+// Estimator framework
+void imu_set_estimator(estimator_type_t type);
+void imu_run_estimator(uint8_t* raw_data);
 
 #endif

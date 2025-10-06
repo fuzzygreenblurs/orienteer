@@ -16,6 +16,7 @@ void i2c_write_reg(uint8_t dev_addr, uint8_t reg_addr, uint8_t value);
 void i2c_read_burst(
   uint8_t dev_bus_addr,
   uint8_t dev_reg_addr,
+  uint8_t* buffer,
   uint16_t num_bytes
 );
 
