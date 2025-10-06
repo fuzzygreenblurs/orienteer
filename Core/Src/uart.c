@@ -62,6 +62,27 @@ void uart_send_string(const char* str) {
   }
 }
 
+void uart_send_int(int32_t value) {
+  char buffer[12];
+  int i = 0;
+
+  if(value < 0) {
+    uart_send_char('-');
+    value = -value;
+  }
+
+  // Convert to string (reverse order)
+  do {
+    buffer[i++] = '0' + (value % 10);
+    value /= 10;
+  } while(value > 0);
+
+  // Send digits in correct order
+  for(int j = i - 1; j >= 0; j--) {
+    uart_send_char(buffer[j]);
+  }
+}
+
 void uart_enqueue_estimate(void) {
   // TODO: Implement using imu API
 }

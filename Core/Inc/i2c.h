@@ -11,6 +11,7 @@ void i2c_setup_pins();
 void i2c_set_fast_mode();
 bool i2c_ping(uint8_t addr);
 uint8_t i2c_read_reg(uint8_t dev_addr, uint8_t reg_addr);
+void i2c_write_reg(uint8_t dev_addr, uint8_t reg_addr, uint8_t value);
 
 void i2c_read_burst(
   uint8_t dev_bus_addr,

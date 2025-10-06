@@ -140,10 +140,4 @@ void DMA1_Stream0_IRQHandler(void) {
   }
 }
 
-void EXTI0_IRQHandler(void) {
-  EXTI->PR |= (1 << 0);                           // RM0390 10.3.6: clear external INT trigger request
-  if(ekf_ready) ekf_ready = 0;                    // prior reading is now considered stale
-
-  imu_process_latest();
-  uart_transmit_attitude();
-}
+// EXTI0_IRQHandler moved to main.c for interrupt-driven approach

@@ -80,7 +80,36 @@ uint8_t i2c_read_reg(uint8_t dev_addr, uint8_t reg_addr) {
   return data;
 }
 
+void i2c_write_reg(uint8_t dev_addr, uint8_t reg_addr, uint8_t value) {
+  uint32_t timeout = 10000;
 
+  // START condition
+  I2C1->CR1 |= (1 << 8);
+  while(!(I2C1->SR1 & (1 << 0)) && timeout > 0) timeout--;
+  if(timeout == 0) return;
+
+  // Send device address (write mode)
+  I2C1->DR = dev_addr << 1;
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 1)) && timeout > 0) timeout--;
+  if(timeout == 0) return;
+  (void)I2C1->SR2; // Clear ADDR flag
+
+  // Send register address
+  I2C1->DR = reg_addr;
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 7)) && timeout > 0) timeout--; // Wait for TxE
+  if(timeout == 0) return;
+
+  // Send data value
+  I2C1->DR = value;
+  timeout = 10000;
+  while(!(I2C1->SR1 & (1 << 7)) && timeout > 0) timeout--; // Wait for TxE
+  if(timeout == 0) return;
+
+  // STOP condition
+  I2C1->CR1 |= (1 << 9);
+}
 
 void i2c_init() {
   // disable i2c peripheral
