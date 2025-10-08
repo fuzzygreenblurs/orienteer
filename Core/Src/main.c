@@ -3,6 +3,7 @@
 #include "uart.h"
 #include "i2c.h"
 #include "imu.h"
+#include "mpu9250.h"
 #include "dummy_led_helpers.h"
 
 volatile uint32_t exti_count = 0;
@@ -70,111 +71,88 @@ int main(void)
   uart_init();
   enable_onboard_led();
 
-  uart_send_string("\r\n=== MPU6050 Detection ===\r\n");
+  uart_send_string("\r\n=== MPU9250 9-DOF Test ===\r\n");
 
   i2c_init();
-  uart_send_string("I2C initialized\r\n");
 
-  if(i2c_ping(0x68)) {
-    uart_send_string("MPU6050 found at 0x68\r\n");
-    toggle_led(2);
-
-    // Read WHO_AM_I register (0x75)
-    uint8_t who_am_i = i2c_read_reg(0x68, 0x75);
-    uart_send_string("WHO_AM_I: 0x");
-    uart_send_char((who_am_i >> 4) < 10 ? '0' + (who_am_i >> 4) : 'A' + (who_am_i >> 4) - 10);
-    uart_send_char((who_am_i & 0xF) < 10 ? '0' + (who_am_i & 0xF) : 'A' + (who_am_i & 0xF) - 10);
-    uart_send_string("\r\n");
-
-    if(who_am_i == 0x68) {
-      uart_send_string("MPU6050 verified!\r\n");
-      toggle_led(1);
-    } else {
-      uart_send_string("Wrong WHO_AM_I value\r\n");
-      toggle_led(8);
+  // Scan I2C bus first
+  uart_send_string("\r\n=== Scanning I2C Bus ===\r\n");
+  uint8_t devices_found = 0;
+  for(uint8_t addr = 0x00; addr < 0x80; addr++) {
+    if(i2c_ping(addr)) {
+      uart_send_string("Device at 0x");
+      uart_send_char((addr >> 4) < 10 ? '0' + (addr >> 4) : 'A' + (addr >> 4) - 10);
+      uart_send_char((addr & 0xF) < 10 ? '0' + (addr & 0xF) : 'A' + (addr & 0xF) - 10);
+      uart_send_string("\r\n");
+      devices_found++;
     }
-  } else {
-    uart_send_string("MPU6050 not found\r\n");
-    toggle_led(4);
   }
 
-  uart_send_string("Ready to start interrupt-driven mode\r\n");
+  if(devices_found == 0) {
+    uart_send_string("No I2C devices found!\r\n");
+    uart_send_string("Check wiring:\r\n");
+    uart_send_string("  SCL: PB6\r\n");
+    uart_send_string("  SDA: PB7\r\n");
+    uart_send_string("  VCC: 3.3V\r\n");
+    uart_send_string("  GND: GND\r\n");
+    toggle_led(8);
+    while(1);
+  }
 
-  // Configure MPU6050 for interrupt-driven mode
-  uart_send_string("\r\nConfiguring MPU6050 interrupts...\r\n");
+  uart_send_string("Found ");
+  uart_send_int(devices_found);
+  uart_send_string(" device(s)\r\n\r\n");
 
-  // Give MPU6050 time to power up (100ms)
-  for(volatile uint32_t i = 0; i < 2000000; i++);
+  // Initialize MPU9250
+  if(!mpu9250_init()) {
+    uart_send_string("MPU9250 initialization failed!\r\n");
+    uart_send_string("Check wiring and power.\r\n");
+    toggle_led(8);
+    while(1);  // Halt
+  }
 
-  // 1. Wake up MPU6050 (clear sleep bit)
-  i2c_write_reg(0x68, 0x6B, 0x00);
-  for(volatile uint32_t i = 0; i < 200000; i++); // 10ms delay
-  uart_send_string("MPU6050 awake\r\n");
+  toggle_led(2);
+  uart_send_string("Starting 9-DOF data streaming...\r\n\r\n");
 
-  // 2. Set sample rate to 500Hz (1kHz / (1 + 1))
-  i2c_write_reg(0x68, 0x19, 0x01);
-  uart_send_string("Sample rate: 500Hz\r\n");
+  // Main loop: read and print 9-DOF data at ~10Hz
+  while(1) {
+    mpu9250_data_t data;
 
-  // 3. Configure INT pin: active high, push-pull, clear on any read
-  i2c_write_reg(0x68, 0x37, 0x10);
-  uart_send_string("INT pin configured\r\n");
+    if(mpu9250_read_all(&data)) {
+      // Print accelerometer (g)
+      uart_send_string("A: ");
+      uart_send_int((int32_t)(data.ax * 1000));  // Convert to milli-g
+      uart_send_string(" ");
+      uart_send_int((int32_t)(data.ay * 1000));
+      uart_send_string(" ");
+      uart_send_int((int32_t)(data.az * 1000));
 
-  // 4. Enable data ready interrupt
-  i2c_write_reg(0x68, 0x38, 0x01);
-  uart_send_string("Data ready interrupt enabled\r\n");
+      // Print gyroscope (deg/s)
+      uart_send_string(" | G: ");
+      uart_send_int((int32_t)data.gx);
+      uart_send_string(" ");
+      uart_send_int((int32_t)data.gy);
+      uart_send_string(" ");
+      uart_send_int((int32_t)data.gz);
 
-  uart_send_string("MPU6050 should now be generating interrupts on PA0\r\n");
+      // Print magnetometer (uT)
+      uart_send_string(" | M: ");
+      uart_send_int((int32_t)data.mx);
+      uart_send_string(" ");
+      uart_send_int((int32_t)data.my);
+      uart_send_string(" ");
+      uart_send_int((int32_t)data.mz);
 
-  // Configure EXTI0 to catch MPU6050 interrupts
-  uart_send_string("\r\nConfiguring EXTI0...\r\n");
-
-  // 1. Configure PA0 as input
-  RCC->AHB1ENR |= (1 << 0);        // Enable GPIOA clock
-  GPIOA->MODER &= ~(3 << 0);       // PA0 as input (00)
-  GPIOA->PUPDR &= ~(3 << 0);       // No pull-up/pull-down
-
-  // 2. Connect EXTI0 to PA0
-  RCC->APB2ENR |= (1 << 14);       // Enable SYSCFG clock
-  SYSCFG->EXTICR[0] &= ~(0xF << 0); // Clear EXTI0 config
-  SYSCFG->EXTICR[0] |= (0x0 << 0);  // Connect EXTI0 to PA0 (0x0 = GPIOA)
-
-  // 3. Configure EXTI0 for rising edge trigger
-  EXTI->IMR |= (1 << 0);           // Unmask EXTI0
-  EXTI->RTSR |= (1 << 0);          // Rising edge trigger
-  EXTI->FTSR &= ~(1 << 0);         // Disable falling edge
-
-  // 4. Enable EXTI0 interrupt in NVIC
-  NVIC_EnableIRQ(EXTI0_IRQn);
-  NVIC_SetPriority(EXTI0_IRQn, 0); // Highest priority
-
-  uart_send_string("EXTI0 configured and enabled\r\n");
-  uart_send_string("System ready - interrupts should be firing\r\n\r\n");
-
-  // Select estimator type
-  imu_set_estimator(ESTIMATOR_COMPLEMENTARY);
-  uart_send_string("Using COMPLEMENTARY filter\r\n\r\n");
-
-  uint32_t last_ekf = 0;
-
-  while(1){
-    // Print attitude at ~10Hz (100ms intervals)
-    for(volatile uint32_t i = 0; i < 200000; i++);
-
-    if(ekf_count != last_ekf) {
-      attitude_t* att = imu_get_current_attitude();
-
-      uart_send_string("EKF:");
-      uart_send_int(ekf_count);
-      uart_send_string(" R:");
-      uart_send_int((int32_t)att->roll);
-      uart_send_string(" P:");
-      uart_send_int((int32_t)att->pitch);
-      uart_send_string(" Y:");
-      uart_send_int((int32_t)att->yaw);
       uart_send_string("\r\n");
 
-      last_ekf = ekf_count;
+      // Toggle LED to show activity
+      GPIOA->ODR ^= (1 << 5);
+    } else {
+      uart_send_string("Read error\r\n");
     }
+
+    // Delay ~100ms (10Hz update rate)
+    for(volatile uint32_t i = 0; i < 2000000; i++);
   }
 }
 

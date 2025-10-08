@@ -44,6 +44,7 @@ Core/Src/syscalls.c \
 Core/Src/uart.c \
 Core/Src/i2c.c \
 Core/Src/imu.c \
+Core/Src/mpu9250.c \
 Core/Src/dummy_led_helpers.c  
 
 # ASM sources
